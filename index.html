@@ -332,6 +332,15 @@
     font-family:'Inter','Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:700;letter-spacing:.2px;}
   .card .navctl.primary:hover{background:#073b70;}
 
+  /* ---------- TẢI ĐỀ PDF (dành cho GV, cần mã AnswerCodes) ---------- */
+  .dlTestLink{display:block;margin:-18px auto 22px;background:none;border:none;color:#0c4f8a;
+    font-family:'Inter','Segoe UI',system-ui,sans-serif;font-size:12px;font-weight:600;cursor:pointer;text-decoration:underline;}
+  .dlTestLink:hover{color:#073b70;}
+  .dlOpt{display:flex;gap:10px;align-items:flex-start;border:1.5px solid var(--line);border-radius:8px;
+    padding:10px 12px;margin-bottom:10px;cursor:pointer;font-size:13.5px;color:#141414;}
+  .dlOpt:has(input:checked){border-color:var(--accent);background:#eaf1fb;}
+  .dlOpt input{margin-top:3px;accent-color:var(--accent);}
+
   /* ---------- RESULTS ---------- */
   #resultsScreen{display:none;flex:1;overflow-y:auto;background:#f4f6f9;}
   #resultsScreen .wrap{max-width:820px;margin:0 auto;padding:30px 20px;}
@@ -457,7 +466,7 @@
     </svg>
   </div>
   <div class="card">
-    <div class="cardHeader">SAT PRACTICE <span class="cardBadge">R&amp;W</span></div>
+    <div class="cardHeader"><span>SAT PRACTICE<span id="cardTestLabel"></span></span> <span class="cardBadge">R&amp;W</span></div>
     <div class="brand-logo">G.EDU</div>
     <div class="brand-sub">G.EDU Language Center</div>
     <h2>SAT Reading &amp; Writing Practice</h2>
@@ -468,6 +477,7 @@
     <label for="clsInput">Class</label>
     <input type="text" id="clsInput" placeholder="Class">
     <button class="navctl primary" style="width:100%;margin-top:6px;" onclick="startTest()">Start Test</button>
+    <button type="button" class="dlTestLink" onclick="openDownloadTestModal()">&#11015; Download test (PDF) &mdash; teacher</button>
   </div>
 </div>
 
@@ -504,6 +514,25 @@
         <button type="button" class="navctl secondary" id="mfStayBtn" onclick="closeModal('moduleFinishModal')">Stay in <span class="mfCurLabel">Module 1</span></button>
         <button type="button" class="navctl primary" id="mfContinueBtn" onclick="confirmFinishModule()">Continue to Module 2</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<div class="modalOverlay" id="downloadTestModal">
+  <div class="modalBox">
+    <h2>Download Test (PDF)</h2>
+    <p style="margin-top:-6px;">Choose a format.<span class="mfSub">Chọn kiểu file PDF muốn tải.</span></p>
+    <label class="dlOpt"><input type="radio" name="dlMode" value="inline" checked>
+      <span><b>Test with key highlighted</b><span class="mfSub">Đề có đáp án — ô đáp án đúng được tô màu xanh.</span></span></label>
+    <label class="dlOpt"><input type="radio" name="dlMode" value="separate">
+      <span><b>Test + answer key on last page</b><span class="mfSub">Đề sạch để phát học sinh, đáp án tách riêng ở trang cuối.</span></span></label>
+    <label for="dlCodeInput" style="display:block;font-size:12.5px;font-weight:600;margin:14px 0 5px;">Teacher access code<span class="mfSub">Mã giáo viên (cùng mã ở tab AnswerCodes).</span></label>
+    <input type="text" id="dlCodeInput" placeholder="Enter code..." onkeydown="if(event.key==='Enter') downloadTestPDF();"
+      style="width:100%;padding:10px 12px;border:1.5px solid var(--line);border-radius:8px;font-size:13.5px;">
+    <div id="dlMsg" style="display:none;color:var(--bad);font-size:12.5px;margin-top:8px;"></div>
+    <div class="closeRow" style="display:flex;justify-content:flex-end;gap:10px;">
+      <button type="button" class="navctl secondary" onclick="closeModal('downloadTestModal')">Cancel</button>
+      <button type="button" class="navctl primary" id="dlGoBtn" onclick="downloadTestPDF()">Download</button>
     </div>
   </div>
 </div>
@@ -1994,6 +2023,8 @@ function attachAutoFormat(id){
 }
 attachAutoFormat('nameInput');
 attachAutoFormat('clsInput');
+/* Hiện tên đề trên thẻ đăng nhập, lấy tự động từ TEST_NAME (bỏ hậu tố "RW") */
+document.getElementById('cardTestLabel').textContent = ' · ' + TEST_NAME.replace(/\s*RW\s*$/i,'').toUpperCase();
 
 function startTest(){
   studentName = stripVNAccents(document.getElementById('nameInput').value.trim()).toUpperCase();
@@ -2633,6 +2664,177 @@ async function downloadReviewPDF(){
     pdf.save(`ReviewReport_${safeName}_${safeTest}.pdf`);
   } finally {
     root.remove();
+  }
+}
+
+/* ============================================================================
+   TẢI ĐỀ PDF (GV) — 2 chế độ:
+     "inline"   : đề có đáp án, ô đáp án đúng tô xanh
+     "separate" : đề sạch + bảng đáp án ở trang cuối
+   Mỗi câu được "chụp" riêng (html2canvas) rồi xếp vào trang A4, không bao giờ
+   cắt ngang một câu và tránh giới hạn chiều cao canvas khi đề dài 54 câu.
+   Cần nhập đúng mã ở tab AnswerCodes (giống mã xem đáp án) để tránh HS tải key.
+   ============================================================================ */
+let dlBusy = false;
+
+function openDownloadTestModal(){
+  document.getElementById('dlMsg').style.display = 'none';
+  openModal('downloadTestModal');
+}
+
+function formatOnlyHTML(raw, q, field){
+  const formats = fieldFormatSpans(q, field);
+  if(!formats.length) return escHtml(raw);
+  const bset = new Set([0, raw.length]);
+  formats.forEach(fm=>{
+    bset.add(Math.max(0, Math.min(fm.start, raw.length)));
+    bset.add(Math.max(0, Math.min(fm.end, raw.length)));
+  });
+  const b = Array.from(bset).sort((x,y)=>x-y);
+  let html = '';
+  for(let i=0; i<b.length-1; i++){
+    if(b[i+1] <= b[i]) continue;
+    let inner = escHtml(raw.slice(b[i], b[i+1]));
+    formats.forEach(fm=>{
+      if(fm.start <= b[i] && fm.end >= b[i+1]){
+        const tag = (fm.tag === 'u' || fm.tag === 'b') ? fm.tag : 'i';
+        inner = `<${tag}>${inner}</${tag}>`;
+      }
+    });
+    html += inner;
+  }
+  return html;
+}
+
+function buildTestPdfDom(mode){
+  const showKey = mode === 'inline';
+  const sans = "font-family:'Inter','Segoe UI',system-ui,sans-serif;";
+  const root = document.createElement('div');
+  root.style.cssText = "position:fixed;left:-10000px;top:0;width:720px;background:#fff;color:#141414;font-family:'Minion Pro','Minion Pro Regular',Georgia,'Times New Roman',serif;";
+
+  let html = `<div class="pdfBlock" style="padding:0 0 16px;">
+    <div style="${sans}font-weight:800;font-size:11px;letter-spacing:1.5px;color:#0c4f8a;">G.EDU LANGUAGE CENTER</div>
+    <div style="font-weight:800;font-size:22px;margin:4px 0 3px;">SAT Reading &amp; Writing — ${escHtml(TEST_NAME)}</div>
+    <div style="${sans}font-size:12px;color:#5b6472;">${showKey ? 'Teacher copy — correct answers highlighted' : 'Answer key on the last page'}</div>
+    ${showKey ? '' : `<div style="${sans}display:flex;gap:36px;margin-top:18px;font-size:13px;">
+      <span>Name: ______________________________</span><span>Class: ____________</span></div>`}
+  </div>`;
+
+  MODULES.forEach((mod, mIdx)=>{
+    html += `<div class="pdfBlock" ${mIdx>0 ? 'data-newpage="1"' : ''} style="padding:0 0 10px;">
+      <div style="${sans}background:#0d3b8c;color:#fff;font-weight:800;font-size:12px;letter-spacing:.6px;padding:8px 14px;text-transform:uppercase;">
+        ${escHtml(mod.label)} · ${mod.questions.length} questions · ${mod.timeLimitMinutes} minutes</div>
+      <div style="font-size:12.5px;color:#333;padding:10px 2px 0;line-height:1.55;">Each question includes one or more passages, which may include a table or graph. Read each passage and question carefully, and then choose the best answer to the question based on the passage(s). Each question has a single best answer.</div>
+    </div>`;
+
+    mod.questions.forEach((q, i)=>{
+      const opts = q.options.map((opt, oi)=>{
+        const letter = LETTERS[oi];
+        const isKey = showKey && letter === q.correctKey;
+        return `<div class="optWrap"><div class="opt${isKey ? ' correctAns' : ''}" style="cursor:default;font-size:13.5px;padding:9px 12px;">
+          <span class="optletter" style="width:22px;height:22px;font-size:10.5px;">${letter}</span>
+          <span class="optext">${formatOnlyHTML(opt, q, 'opt-'+letter)}</span></div></div>`;
+      }).join('');
+      html += `<div class="pdfBlock question-block" style="padding:10px 0 18px;border-bottom:1px solid #e3e6eb;">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+          <span class="qnum-badge" style="width:26px;height:26px;font-size:13px;">${i+1}</span>
+          <span style="${sans}font-size:11px;color:#5b6472;">${escHtml(mod.label)}</span>
+        </div>
+        ${q.image ? `<img src="${q.image}" alt="" style="max-width:100%;max-height:300px;width:auto;height:auto;display:block;margin:0 auto 12px;border:1px solid #d8dbe0;border-radius:6px;">` : ''}
+        ${q.passage ? `<div class="passage-text" style="font-size:14px;line-height:1.65;margin-bottom:12px;">${formatOnlyHTML(q.passage, q, 'passage')}</div>` : ''}
+        <div class="question-text" style="font-size:14px;margin-bottom:10px;">${formatOnlyHTML(q.questionText, q, 'question')}</div>
+        <div class="options" style="gap:8px;">${opts}</div>
+      </div>`;
+    });
+  });
+
+  if(!showKey){
+    html += `<div class="pdfBlock" data-newpage="1" style="padding:0 0 10px;">
+      <div style="font-weight:800;font-size:22px;">Answer Key</div>
+      <div style="${sans}font-size:12px;color:#5b6472;margin:3px 0 6px;">${escHtml(TEST_NAME)}</div>
+      ${MODULES.map(mod=>`
+        <div style="${sans}font-weight:700;font-size:14px;margin:18px 0 8px;">${escHtml(mod.label)}</div>
+        <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:6px;">
+          ${mod.questions.map((q,i)=>`<div style="${sans}border:1px solid #d8dbe0;border-radius:6px;padding:6px 10px;font-size:13px;display:flex;justify-content:space-between;">
+            <span style="color:#5b6472;">${i+1}</span><b style="color:#1f8a4c;">${q.correctKey}</b></div>`).join('')}
+        </div>`).join('')}
+    </div>`;
+  }
+
+  root.innerHTML = html;
+  document.body.appendChild(root);
+  return root;
+}
+
+async function renderTestBlocksToPdf(root, fileName, onProgress){
+  const { jsPDF } = window.jspdf;
+  const pdf = new jsPDF({ unit: 'pt', format: 'a4' });
+  const pageW = pdf.internal.pageSize.getWidth();
+  const pageH = pdf.internal.pageSize.getHeight();
+  const M = 36, contentW = pageW - 2*M, bottomY = pageH - M - 12;
+  let y = M, emptyPage = true;
+  const blocks = Array.from(root.querySelectorAll('.pdfBlock'));
+
+  for(let i=0; i<blocks.length; i++){
+    const el = blocks[i];
+    if(onProgress) onProgress(i+1, blocks.length);
+    if(el.dataset.newpage && !emptyPage){ pdf.addPage(); y = M; emptyPage = true; }
+    const canvas = await html2canvas(el, { scale: 2, backgroundColor: '#ffffff' });
+    let w = contentW, h = canvas.height / canvas.width * w;
+    const maxH = bottomY - M;
+    if(h > maxH){ w = w * maxH / h; h = maxH; }
+    if(y + h > bottomY && !emptyPage){ pdf.addPage(); y = M; }
+    pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', M + (contentW - w)/2, y, w, h);
+    y += h + 8;
+    emptyPage = false;
+  }
+
+  const n = pdf.internal.getNumberOfPages();
+  const footerName = stripVNAccents(TEST_NAME);
+  for(let p=1; p<=n; p++){
+    pdf.setPage(p);
+    pdf.setFontSize(8);
+    pdf.setTextColor(130);
+    pdf.text(`G.EDU - ${footerName} - Page ${p}/${n}`, pageW/2, pageH - 18, { align: 'center' });
+  }
+  pdf.save(fileName);
+}
+
+async function downloadTestPDF(){
+  if(dlBusy) return;
+  const mode = document.querySelector('input[name="dlMode"]:checked').value;
+  const input = document.getElementById('dlCodeInput');
+  const btn = document.getElementById('dlGoBtn');
+  const msg = document.getElementById('dlMsg');
+  const showMsg = t => { msg.textContent = t; msg.style.display = 'block'; };
+  msg.style.display = 'none';
+
+  const code = input.value.trim();
+  if(!code){ showMsg('Please enter the teacher code.'); return; }
+  if(typeof window.jspdf === 'undefined' || typeof window.html2canvas === 'undefined'){
+    showMsg('Could not load the PDF library. Please check your connection and try again.');
+    return;
+  }
+
+  dlBusy = true; btn.disabled = true; input.disabled = true; btn.textContent = 'Checking...';
+  let root = null;
+  try{
+    const serverCode = await fetchUnlockCodeFromSheet();
+    if(serverCode === null){ showMsg('Could not connect to the server to verify the code. Please try again.'); return; }
+    if(!serverCode || code !== serverCode){ showMsg('Incorrect code.'); return; }
+
+    if(document.fonts && document.fonts.ready){ await document.fonts.ready; }
+    root = buildTestPdfDom(mode);
+    await Promise.all(Array.from(root.querySelectorAll('img')).map(img => img.decode ? img.decode().catch(()=>{}) : null));
+    const safeTest = TEST_NAME.replace(/[^\p{L}\p{N}]+/gu, '_');
+    const fileName = `${safeTest}_${mode === 'inline' ? 'DeCoDapAn' : 'De_DapAnCuoi'}.pdf`;
+    await renderTestBlocksToPdf(root, fileName, (i,n) => { btn.textContent = `Generating... ${i}/${n}`; });
+    closeModal('downloadTestModal');
+  } catch(e){
+    showMsg('Failed to create the PDF. Please try again.');
+  } finally {
+    if(root) root.remove();
+    dlBusy = false; btn.disabled = false; input.disabled = false; btn.textContent = 'Download';
   }
 }
 
